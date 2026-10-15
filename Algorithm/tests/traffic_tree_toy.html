@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traffic Tree Toy</title>
+<style>
+:root { color-scheme: light; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #233246; background: #eef2f6; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { padding: 24px 28px 18px; }
+h1 { font-size: 25px; margin: 0 0 6px; }
+p { line-height: 1.5; margin: 0; }
+header p, .hint { color: #59697b; }
+main { display: grid; grid-template-columns: 265px minmax(0, 1fr); gap: 18px; padding: 0 28px 28px; max-width: 1600px; margin: auto; }
+aside, .map { background: white; border: 1px solid #d7dfe8; border-radius: 14px; }
+aside { padding: 20px; }
+label { display: block; font-weight: 600; margin-bottom: 8px; }
+input[type=range] { width: 100%; accent-color: #336fc2; }
+output { display: block; color: #59697b; font-size: 13px; margin: 5px 0 24px; }
+.buttons { display: grid; gap: 8px; }
+button { font: inherit; border: 1px solid #c8d3e0; background: #f7f9fc; border-radius: 7px; padding: 9px 8px; color: #233246; cursor: pointer; }
+button:hover { background: #eaf0f8; }
+button:focus-visible, .node:focus-visible { outline: 3px solid #336fc2; outline-offset: 3px; }
+button:disabled { opacity: .5; cursor: default; }
+select { width: 100%; padding: 8px; margin: 0 0 10px; font: inherit; color: inherit; background: white; border: 1px solid #c8d3e0; border-radius: 7px; }
+.connect-controls { margin: 20px 0; }
+.connect-controls button { width: 100%; }
+h2 { font-size: 15px; margin: 24px 0 8px; }
+#summary { line-height: 1.7; font-size: 13px; white-space: pre-line; }
+#status { margin-top: 16px; font-size: 13px; color: #59697b; min-height: 3em; }
+.map { overflow: hidden; min-width: 0; }
+.legend { padding: 17px 20px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; border-bottom: 1px solid #e5eaf0; }
+.legend span::before { content: ''; display: inline-block; width: 9px; height: 9px; background: var(--color); border-radius: 50%; margin-right: 5px; }
+svg { display: block; width: 100%; height: auto; aspect-ratio: 820 / 600; background: #fafbfd; touch-action: none; user-select: none; }
+.node { cursor: grab; }
+.node:active { cursor: grabbing; }
+.road-label { paint-order: stroke; stroke: #fafbfd; stroke-width: 5px; stroke-linejoin: round; fill: #344456; font-size: 12px; }
+.hint { padding: 12px 20px; font-size: 12px; border-top: 1px solid #e5eaf0; }
+#error { margin: 0 28px 16px; padding: 14px; background: #fff1ee; color: #912b1b; border: 1px solid #e9b6ac; border-radius: 8px; }
+@media(max-width: 760px) { main { grid-template-columns: 1fr; padding: 0 14px 14px; } header { padding: 20px 14px; } .map { grid-row: 1; } aside { padding: 16px; } }
+</style>
+</head>
+<body>
+<header><h1>Traffic Tree Toy</h1><p>Shape a road network and explore how capacity affects a trip.</p></header>
+<noscript><p id="error">JavaScript is disabled. Enable JavaScript in your browser to display the interactive road network.</p></noscript>
+<div id="error" role="alert" hidden></div>
+<main>
+<aside aria-label="Network controls">
+<label for="demand">Traffic demand</label><input id="demand" type="range" min="10" max="180" value="80"><output id="demand-value" for="demand"></output>
+<label for="road">Road to edit</label><select id="road" aria-label="Road connected to the selected intersection"></select>
+<label for="capacity">Selected road capacity</label><input id="capacity" type="range" min="20" max="200" value="70"><output id="capacity-value" for="capacity"></output>
+<div class="connect-controls"><label id="connect-label" for="target">Connect selected intersection to</label><select id="target"></select><button id="connect">Connect existing intersections</button></div>
+<div class="buttons"><button id="add">Add new intersection + road</button><button id="delete-road">Delete selected road</button><button id="delete">Delete selected intersection</button><button id="end">Set selected as End</button><button id="reset">Reset demo</button></div>
+<h2>Simulation</h2><div id="summary" aria-live="polite"></div><p id="status" role="status">Loading the road network…</p>
+</aside>
+<section class="map" aria-label="Traffic network visualization">
+<div class="legend"><strong>Road utilization</strong><span style="--color:#2a9d8f">Below 65%</span><span style="--color:#e9a23b">65–99%</span><span style="--color:#d1495b">100% or more</span><span style="--color:#b8b8b8">Unused</span></div>
+<svg id="network" viewBox="0 0 820 600" aria-label="Interactive traffic network"><title>Traffic network</title><g id="roads"></g><g id="nodes"></g></svg>
+<p class="hint">Drag intersections to move them. Select a node, choose a destination, then connect. Roads work in both directions. Blue = Start; purple = End. All traffic uses the fastest route at the current demand; it is not split between routes. This is a toy model.</p>
+</section>
+</main>
+<script>
+"use strict";
+window.addEventListener("error", event => {
+  const box = document.getElementById("error");
+  box.hidden = false;
+  box.textContent = "The visualization could not finish drawing: " + event.message;
+});
+const $ = id => document.getElementById(id);
+const svg = $("network"), NS = "http://www.w3.org/2000/svg";
+let nodes = [], roads = [], nextId = 0, nextRoadId = 0;
+let startId, endId, selectedId, selectedRoadId, drag = null;
+const byId = id => nodes.find(n => n.id === id);
+const roadById = id => roads.find(r => r.id === id);
+const incidentRoads = id => roads.filter(r => r.a === id || r.b === id);
+const roadName = r => `${byId(r.a).name} ↔ ${byId(r.b).name}`;
+function addNode(name, x, y) {
+  const n = {id: nextId++, name, x, y}; nodes.push(n); return n;
+}
+function addRoad(a, b, capacity = 100) {
+  if (a === b || !byId(a) || !byId(b) || roads.some(r =>
+    (r.a === a && r.b === b) || (r.a === b && r.b === a))) return null;
+  const road = {id: nextRoadId++, a, b, capacity}; roads.push(road); return road;
+}
+function travelTime(road, demand) {
+  const a = byId(road.a), b = byId(road.b);
+  return Math.max(Math.hypot(a.x-b.x,a.y-b.y)/100,.05)*(1+.15*(demand/road.capacity)**4);
+}
+function routeForDemand(demand) {
+  // Positive travel times allow Dijkstra's algorithm, including networks with loops.
+  const distance = new Map(nodes.map(n => [n.id, Infinity]));
+  const previous = new Map(), pending = new Set(nodes.map(n => n.id));
+  distance.set(startId, 0);
+  while (pending.size) {
+    let current = null, best = Infinity;
+    for (const id of pending) if (distance.get(id) < best) { current = id; best = distance.get(id); }
+    if (current === null || current === endId) break;
+    pending.delete(current);
+    for (const road of incidentRoads(current)) {
+      const neighbor = road.a === current ? road.b : road.a;
+      if (!pending.has(neighbor)) continue;
+      const candidate = best + travelTime(road, demand);
+      if (candidate < distance.get(neighbor)) {
+        distance.set(neighbor, candidate); previous.set(neighbor, {id:current, road});
+      }
+    }
+  }
+  if (!Number.isFinite(distance.get(endId))) return {nodes:[], roads:[], time:Infinity};
+  const routeNodes = [byId(endId)], routeRoads = [];
+  let current = endId;
+  while (current !== startId) {
+    const step = previous.get(current);
+    routeRoads.unshift(step.road); routeNodes.unshift(byId(step.id)); current = step.id;
+  }
+  return {nodes:routeNodes, roads:routeRoads, time:distance.get(endId)};
+}
+function element(tag, attrs, parent, text) {
+  const el = document.createElementNS(NS, tag);
+  Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+  if (text !== undefined) el.textContent = text;
+  parent.appendChild(el); return el;
+}
+function options(select, choices, value, emptyText) {
+  select.replaceChildren();
+  for (const choice of choices.length ? choices : [{id:"", label:emptyText}]) {
+    const option = document.createElement("option");
+    option.value = choice.id; option.textContent = choice.label; select.appendChild(option);
+  }
+  select.disabled = !choices.length;
+  select.value = choices.some(c => String(c.id) === String(value)) ? value : choices.length ? choices[0].id : "";
+}
+function selectNode(id) {
+  selectedId = id;
+  const attached = incidentRoads(id);
+  if (!attached.some(r => r.id === selectedRoadId)) selectedRoadId = attached.length ? attached[0].id : null;
+}
+function reset() {
+  nodes = []; roads = []; nextId = 0; nextRoadId = 0; drag = null;
+  const start = addNode("Start", 100, 280), a = addNode("A", 280, 210);
+  const b = addNode("B", 480, 290), end = addNode("End", 720, 220);
+  const c = addNode("C", 300, 415), d = addNode("D", 525, 435);
+  addRoad(start.id,a.id,100); addRoad(a.id,b.id,85); addRoad(b.id,end.id,70);
+  addRoad(a.id,c.id,120); addRoad(b.id,d.id,90);
+  startId = start.id; endId = end.id; selectedRoadId = null; selectNode(end.id);
+  $("demand").value = 80;
+  $("status").textContent = "Select an intersection to move it, add a road, or connect it to another intersection.";
+  render();
+}
+function render() {
+  const demand = Number($("demand").value), route = routeForDemand(demand);
+  const active = new Set(route.roads.map(r => r.id)), selected = byId(selectedId);
+  const attached = incidentRoads(selectedId);
+  if (!attached.some(r => r.id === selectedRoadId)) selectedRoadId = attached.length ? attached[0].id : null;
+  $("roads").replaceChildren(); $("nodes").replaceChildren();
+  let bottleneck = null, maxUtil = -1;
+  for (const road of roads) {
+    const a = byId(road.a), b = byId(road.b);
+    const used = active.has(road.id), util = used ? demand / road.capacity : 0;
+    const color = !used ? "#b8b8b8" : util < .65 ? "#2a9d8f" : util < 1 ? "#e9a23b" : "#d1495b";
+    if (road.id === selectedRoadId) element("line", {x1:a.x,y1:a.y,x2:b.x,y2:b.y,stroke:"#c5d9f3","stroke-width":13,"stroke-linecap":"round"}, $("roads"));
+    element("line", {x1:a.x,y1:a.y,x2:b.x,y2:b.y,stroke:color,"stroke-width":used?7:4,"stroke-linecap":"round"}, $("roads"));
+    element("text", {x:(a.x+b.x)/2,y:(a.y+b.y)/2-13,"text-anchor":"middle",class:"road-label"}, $("roads"), used ? `flow ${demand} / cap ${road.capacity}` : `cap ${road.capacity}`);
+    if (used && util > maxUtil) { maxUtil = util; bottleneck = road; }
+  }
+  for (const n of nodes) {
+    const marker = n.id === startId ? "Start" : n.id === endId ? "End" : "";
+    const g = element("g", {class:"node", "data-id":n.id, tabindex:0,role:"button","aria-label":`${n.name}${marker ? ', '+marker : ''}. Select intersection`,"aria-pressed":n.id===selectedId}, $("nodes"));
+    element("circle", {cx:n.x,cy:n.y,r:19,fill:n.id===startId?"#3a86ff":n.id===endId?"#8338ec":"white",stroke:"#18293c","stroke-width":n.id===selectedId?3:1.5}, g);
+    element("text", {x:n.x,y:n.y+4,"text-anchor":"middle",fill:marker?"white":"#18293c","font-size":11,"font-weight":600,"pointer-events":"none"}, g,n.name);
+    if (marker && n.name !== marker) element("text", {x:n.x,y:n.y+35,"text-anchor":"middle","font-size":12,fill:"#8338ec"},g,marker);
+  }
+  $("demand-value").textContent = `${demand} vehicles / toy time step`;
+  options($("road"), attached.map(r => ({id:r.id,label:roadName(r)})), selectedRoadId, "No road selected");
+  const editable = roadById(selectedRoadId);
+  $("capacity").disabled = !editable;
+  if (editable) $("capacity").value = editable.capacity;
+  $("capacity-value").textContent = editable ? `${editable.capacity} vehicles / toy time step` : "Select an intersection with a road";
+  const neighbors = new Set(attached.map(r => r.a === selectedId ? r.b : r.a));
+  const targets = selected ? nodes.filter(n => n.id !== selectedId && !neighbors.has(n.id)) : [];
+  options($("target"), targets.map(n => ({id:n.id,label:n.name})), $("target").value, selected ? "Already connected to every intersection" : "Select an intersection first");
+  $("connect-label").textContent = selected ? `Connect ${selected.name} to` : "Connect selected intersection to";
+  $("connect").disabled = !targets.length;
+  $("add").disabled = !selected;
+  $("delete-road").disabled = !editable;
+  $("delete").disabled = !selected || selectedId === startId || selectedId === endId;
+  $("end").disabled = !selected || selectedId === startId || selectedId === endId;
+  $("summary").textContent = route.nodes.length ? `Path: ${route.nodes.map(n=>n.name).join(' → ')}\nEstimated trip time: ${route.time.toFixed(2)} toy min\nBottleneck: ${bottleneck ? roadName(bottleneck)+' ('+Math.round(maxUtil*100)+'% utilized)' : 'none'}` : "No route from Start to End. Connect intersections to restore a route.";
+}
+function point(event) {
+  const p = svg.createSVGPoint(); p.x = event.clientX; p.y = event.clientY;
+  return p.matrixTransform(svg.getScreenCTM().inverse());
+}
+svg.addEventListener("pointerdown", event => {
+  if (event.button !== undefined && event.button !== 0) return;
+  const target = event.target.closest(".node");
+  if (!target) { selectNode(null); render(); return; }
+  selectNode(Number(target.dataset.id)); const n = byId(selectedId), p = point(event);
+  drag = {id:n.id,dx:n.x-p.x,dy:n.y-p.y,pointer:event.pointerId};
+  svg.setPointerCapture(event.pointerId);
+  $("status").textContent = `Selected ${n.name}. Choose another intersection under “Connect ${n.name} to” to add a road.`;
+  render();
+});
+svg.addEventListener("pointermove", event => {
+  if (!drag || drag.pointer !== event.pointerId) return;
+  const n = byId(drag.id), p = point(event);
+  n.x = Math.max(30,Math.min(790,p.x+drag.dx)); n.y = Math.max(40,Math.min(555,p.y+drag.dy)); render();
+});
+for (const name of ["pointerup","pointercancel","lostpointercapture"]) svg.addEventListener(name, () => { drag = null; });
+svg.addEventListener("keydown", event => {
+  const target = event.target.closest(".node"); if (!target || !["Enter"," "].includes(event.key)) return;
+  event.preventDefault(); selectNode(Number(target.dataset.id)); render();
+  $("nodes").querySelector(`[data-id="${selectedId}"]`).focus();
+});
+$("demand").addEventListener("input", render);
+$("road").addEventListener("change", () => { selectedRoadId = Number($("road").value); render(); });
+$("capacity").addEventListener("input", () => {
+  const road = roadById(selectedRoadId); if (road) road.capacity = Number($("capacity").value); render();
+});
+$("connect").addEventListener("click", () => {
+  const source = byId(selectedId), target = $("target").value;
+  if (!source || target === "") return;
+  const road = addRoad(source.id, Number(target));
+  if (!road) { $("status").textContent = "Choose a different intersection without an existing road to this one."; return; }
+  selectedRoadId = road.id;
+  $("status").textContent = `Connected ${roadName(road)}. Edit this road's capacity above.`; render();
+});
+$("add").addEventListener("click", () => {
+  const parent = byId(selectedId); if (!parent) return;
+  const angle = incidentRoads(parent.id).length%2 ? -.65 : .65;
+  const n = addNode(`N${nextId}`,Math.min(790,parent.x+130*Math.cos(angle)),Math.max(40,Math.min(555,parent.y+130*Math.sin(angle))));
+  selectedRoadId = addRoad(parent.id,n.id).id; selectNode(n.id);
+  $("status").textContent = `Added ${n.name} with a road to ${parent.name}.`; render();
+});
+$("delete-road").addEventListener("click", () => {
+  const road = roadById(selectedRoadId); if (!road) return;
+  const name = roadName(road); roads = roads.filter(r => r.id !== road.id); selectedRoadId = null;
+  $("status").textContent = `Deleted road ${name}. Both intersections remain.`; render();
+});
+$("delete").addEventListener("click", () => {
+  const n = byId(selectedId); if (!n || n.id === startId || n.id === endId) return;
+  roads = roads.filter(r => r.a !== n.id && r.b !== n.id); nodes = nodes.filter(node => node.id !== n.id);
+  selectNode(null); $("status").textContent = `Deleted ${n.name} and its attached roads. Other intersections remain.`; render();
+});
+$("end").addEventListener("click", () => {
+  const n = byId(selectedId); if (!n || n.id === startId) return;
+  endId = n.id; $("status").textContent = `${n.name} is now the End intersection.`; render();
+});
+$("reset").addEventListener("click", reset);
+reset();
+</script>
+</body>
+</html>
